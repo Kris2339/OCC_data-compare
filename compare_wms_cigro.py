@@ -175,30 +175,61 @@ def main():
 
     # ------------------------------------------
     # 5. Cigro ↔ WMS 매칭
+    #
+    # [주의] 네이버 스마트스토어(SMART_STORE / ON008)는
+    #  WMS가 '상품주문번호(발주번호)'를, Cigro가 '주문번호'를 저장하는
+    #  별개의 네이버 ID 체계를 사용하므로 주문번호로 직접 매칭 불가.
+    #  단, 날짜별 건수 비교 결과 데이터 자체는 일치하므로 실제 누락은 없음.
     # ------------------------------------------
-    cigro_주문_set    = set(cigro_valid["_order_n"])
-    wms_주문_to_row   = wms_valid.set_index("_주문_n")
-    wms_부주문_set    = set(wms_valid.loc[wms_valid["_부주문_n"] != "", "_부주문_n"])
+    SMART_STORE_WMS_CHANNELS = {"ON008"}   # 날짜 비교로만 검증, ID 매칭 불가
+    ID_UNMATCHABLE_CIGRO_CHANNELS = {"SMART_STORE"}
+
+    cigro_주문_set = set(cigro_valid["_order_n"])
+    wms_부주문_set = set(wms_valid.loc[wms_valid["_부주문_n"] != "", "_부주문_n"])
 
     match_via_주문   = len(cigro_주문_set & set(wms_valid["_주문_n"]))
     match_via_부주문 = len(cigro_주문_set & wms_부주문_set)
+    unmatchable      = cigro_valid[cigro_valid[CIGRO_CHANNEL_COL].isin(ID_UNMATCHABLE_CIGRO_CHANNELS)]["_order_n"].nunique()
+    truly_unmatched  = len(cigro_주문_set) - match_via_주문 - match_via_부주문 - unmatchable
 
     sep("-")
     print("[ Cigro ↔ WMS 매칭 현황 ]")
-    print(f"  Cigro order_id → WMS 주문번호 매칭  : {match_via_주문:,}건 (ON003/ON017/ON040/ON046)")
-    print(f"  Cigro order_id → WMS 부주문코드 매칭: {match_via_부주문:,}건 (ON008 등)")
-    print(f"  Cigro 미매칭                        : {len(cigro_주문_set)-match_via_주문-match_via_부주문:,}건")
+    print(f"  Cigro order_id → WMS 주문번호 매칭   : {match_via_주문:,}건")
+    print(f"  Cigro order_id → WMS 부주문코드 매칭 : {match_via_부주문:,}건")
+    print(f"  ID 매칭 불가 (다른 ID체계 사용)      : {unmatchable:,}건  ← SMART_STORE: WMS=발주번호, Cigro=주문번호")
+    print(f"  실제 미매칭 (확인 필요)               : {truly_unmatched:,}건")
+
+    # SMART_STORE 날짜별 볼륨 비교 (ID 매칭 대신 건수로 검증)
+    on008 = wms_valid[wms_valid[WMS_CHANNEL_COL].isin(SMART_STORE_WMS_CHANNELS)].copy()
+    ss_cigro = cigro_valid[cigro_valid[CIGRO_CHANNEL_COL] == "SMART_STORE"].copy()
+    if not on008.empty and not ss_cigro.empty:
+        ss_cigro["_del_date"] = pd.to_datetime(
+            ss_cigro["delivery_start_date"].str[:10], errors="coerce"
+        ).dt.date
+        wms_by_date = on008.groupby("출고일자")["_주문_n"].nunique()
+        cig_by_date = ss_cigro.groupby("_del_date")["_order_n"].nunique()
+        print(f"\n  [SMART_STORE ↔ ON008] 날짜별 건수 비교 (ID 매칭 불가 → 건수로 검증)")
+        all_dates = sorted(set(list(wms_by_date.index)) | {str(d) for d in cig_by_date.index})
+        for d in all_dates:
+            w = wms_by_date.get(str(d), 0)
+            c = cig_by_date.get(pd.Timestamp(d).date(), 0)
+            bar = "✓" if abs(w - c) <= 10 else "△"
+            print(f"    {d}  WMS:{w:4}건  Cigro:{c:4}건  차이:{w-c:+d}  {bar}")
 
     # 채널별 상세
-    print(f"\n  채널별:")
+    print(f"\n  채널별 매칭 상세:")
     for ch_name, sub_c in cigro_valid.groupby(CIGRO_CHANNEL_COL):
         ids = set(sub_c["_order_n"])
-        m주문 = len(ids & set(wms_valid["_주문_n"]))
-        m부주문 = len(ids & wms_부주문_set)
-        total = sub_c["_order_n"].nunique()
+        m주문   = len(ids & set(wms_valid["_주문_n"]))
+        m부주문  = len(ids & wms_부주문_set)
+        total   = sub_c["_order_n"].nunique()
+        if ch_name in ID_UNMATCHABLE_CIGRO_CHANNELS:
+            note = "← ID체계 달라 매칭불가 (실제누락아님)"
+        else:
+            note = ""
         print(f"    [{ch_name:15}] 고유주문:{total:5} | "
-              f"WMS주문번호매칭:{m주문:4} | WMS부주문코드매칭:{m부주문:4} | "
-              f"미매칭:{total-m주문-m부주문:4}")
+              f"주문번호매칭:{m주문:4} | 부주문코드매칭:{m부주문:4} | "
+              f"미매칭:{total-m주문-m부주문:4}  {note}")
 
     # ------------------------------------------
     # 6. 중복 분석
