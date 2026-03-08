@@ -95,6 +95,11 @@ def main():
 
     wms_valid = wms[wms[WMS_ORDER_COL].notna()].copy()
 
+    # 수량 0인 행 제외 (취소/오류 행 등)
+    wms_qty_num = pd.to_numeric(wms_valid[WMS_QTY_COL], errors="coerce").fillna(0)
+    n_zero_qty = (wms_qty_num <= 0).sum()
+    wms_valid = wms_valid[wms_qty_num > 0].copy()
+
     # 정규화 키
     wms_valid["_주문_n"]    = wms_valid[WMS_ORDER_COL].apply(norm)
     wms_valid["_부주문_n"]  = wms_valid[WMS_SUBORDER_COL].apply(norm)
@@ -120,7 +125,8 @@ def main():
 
     print(f"\n[ WMS 출고 데이터 (Sheet1) ]")
     print(f"  원본 전체 행수                      : {len(wms):,}행")
-    print(f"  유효 행수 (주문번호 있음)            : {len(wms_valid):,}행")
+    print(f"  수량 0 제외                         : {n_zero_qty:,}행")
+    print(f"  유효 행수 (주문번호 있음+수량>0)     : {len(wms_valid):,}행")
     print(f"  고유 주문번호                        : {wms_unique_주문:,}건")
     print(f"  부주문코드 있는 행                   : {wms_has_부주문:,}행 / 고유 {wms_unique_부주문:,}건")
     print(f"  중복탐지 고유 키 (부주문/주문+SKU)   : {wms_unique_dup:,}건")
@@ -199,22 +205,16 @@ def main():
     print(f"  ID 매칭 불가 (다른 ID체계 사용)      : {unmatchable:,}건  ← SMART_STORE: WMS=발주번호, Cigro=주문번호")
     print(f"  실제 미매칭 (확인 필요)               : {truly_unmatched:,}건")
 
-    # SMART_STORE 날짜별 볼륨 비교 (ID 매칭 대신 건수로 검증)
+    # SMART_STORE 전체 건수 비교 (날짜 기준 아님 — 주문일과 출고일이 다를 수 있음)
     on008 = wms_valid[wms_valid[WMS_CHANNEL_COL].isin(SMART_STORE_WMS_CHANNELS)].copy()
     ss_cigro = cigro_valid[cigro_valid[CIGRO_CHANNEL_COL] == "SMART_STORE"].copy()
     if not on008.empty and not ss_cigro.empty:
-        ss_cigro["_del_date"] = pd.to_datetime(
-            ss_cigro["delivery_start_date"].str[:10], errors="coerce"
-        ).dt.date
-        wms_by_date = on008.groupby("출고일자")["_주문_n"].nunique()
-        cig_by_date = ss_cigro.groupby("_del_date")["_order_n"].nunique()
-        print(f"\n  [SMART_STORE ↔ ON008] 날짜별 건수 비교 (ID 매칭 불가 → 건수로 검증)")
-        all_dates = sorted(set(list(wms_by_date.index)) | {str(d) for d in cig_by_date.index})
-        for d in all_dates:
-            w = wms_by_date.get(str(d), 0)
-            c = cig_by_date.get(pd.Timestamp(d).date(), 0)
-            bar = "✓" if abs(w - c) <= 10 else "△"
-            print(f"    {d}  WMS:{w:4}건  Cigro:{c:4}건  차이:{w-c:+d}  {bar}")
+        w_total = on008["_주문_n"].nunique()
+        c_total = ss_cigro["_order_n"].nunique()
+        diff = w_total - c_total
+        bar = "✓" if abs(diff) <= 20 else "△"
+        print(f"\n  [SMART_STORE ↔ ON008] 전체 건수 비교 (ID 매칭 불가 → 건수로 검증, 날짜 무관)")
+        print(f"    WMS ON008 고유주문: {w_total:,}건  |  Cigro SMART_STORE: {c_total:,}건  |  차이: {diff:+d}  {bar}")
 
     # 채널별 상세
     print(f"\n  채널별 매칭 상세:")
