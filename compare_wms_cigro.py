@@ -237,22 +237,26 @@ def main():
     # ------------------------------------------
     # 5. Cigro ↔ WMS 매칭 현황
     # ------------------------------------------
-    cigro_주문_set = set(cigro_valid["_order_n"])
-    wms_부주문_set = set(wms_valid.loc[wms_valid["_부주문_n"] != "", "_부주문_n"])
+    # SMART_STORE 등 ID 매칭 불가 채널은 분리하여 계산 (이중 카운팅 방지)
+    cigro_matchable  = cigro_valid[~cigro_valid[CIGRO_CHANNEL_COL].isin(ID_UNMATCHABLE_CIGRO_CHANNELS)]
+    cigro_unmatchable= cigro_valid[ cigro_valid[CIGRO_CHANNEL_COL].isin(ID_UNMATCHABLE_CIGRO_CHANNELS)]
 
-    match_via_주문   = len(cigro_주문_set & set(wms_valid["_주문_n"]))
-    match_via_부주문 = len(cigro_주문_set & wms_부주문_set)
-    unmatchable      = cigro_valid[
-        cigro_valid[CIGRO_CHANNEL_COL].isin(ID_UNMATCHABLE_CIGRO_CHANNELS)
-    ]["_order_n"].nunique()
-    truly_unmatched  = len(cigro_주문_set) - match_via_주문 - match_via_부주문 - unmatchable
+    matchable_set    = set(cigro_matchable["_order_n"])
+    wms_부주문_set   = set(wms_valid.loc[wms_valid["_부주문_n"] != "", "_부주문_n"])
+
+    match_via_주문   = len(matchable_set & set(wms_valid["_주문_n"]))
+    match_via_부주문 = len(matchable_set & wms_부주문_set)
+    unmatchable      = cigro_unmatchable["_order_n"].nunique()
+    # 미매칭 = Cigro에는 있는데 WMS에서 출고 기록 없는 것 (날짜 범위 차이 등)
+    truly_unmatched  = len(matchable_set) - match_via_주문 - match_via_부주문
 
     sep("-")
-    print("[ Cigro ↔ WMS 매칭 현황 ]")
-    print(f"  Cigro order_id → WMS 주문번호 매칭   : {match_via_주문:,}건")
-    print(f"  Cigro order_id → WMS 부주문코드 매칭 : {match_via_부주문:,}건")
-    print(f"  ID 매칭 불가 (다른 ID체계 사용)      : {unmatchable:,}건  ← SMART_STORE: WMS=발주번호, Cigro=주문번호")
-    print(f"  실제 미매칭 (확인 필요)               : {truly_unmatched:,}건")
+    print("[ Cigro → WMS 출고 확인 ]  (Cigro 주문이 WMS에 출고됐는지 체크)")
+    print(f"  ID 매칭 가능 채널 Cigro 주문         : {len(matchable_set):,}건")
+    print(f"  ── WMS 주문번호 매칭됨               : {match_via_주문:,}건")
+    print(f"  ── WMS 부주문코드 매칭됨             : {match_via_부주문:,}건")
+    print(f"  ── 미매칭 (WMS 출고 미확인)          : {truly_unmatched:,}건  ← 날짜범위 차이 또는 미출고")
+    print(f"  ID 매칭 불가 채널 (건수 비교로 검증) : {unmatchable:,}건  ← SMART_STORE: WMS=발주번호 vs Cigro=주문번호")
 
     # SMART_STORE 전체 건수 비교 (날짜 기준 아님 — 주문일과 출고일이 다를 수 있음)
     on008    = wms_valid[wms_valid[WMS_CHANNEL_COL].isin(SMART_STORE_WMS_CHANNELS)]
