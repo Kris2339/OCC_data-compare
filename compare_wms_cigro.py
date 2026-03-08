@@ -10,8 +10,6 @@ import glob
 
 # Sheet1: WMS 출고 데이터 컬럼명
 WMS_ORDER_COL = "주문번호"   # 주문번호
-
-WMS_ORDER_COL = "주문번호"   # 주문번호
 WMS_SKU_COL   = "상품코드"   # SKU 코드
 WMS_QTY_COL   = "수량"       # 출고 수량
 
@@ -33,11 +31,10 @@ def resolve_input_file(base_dir):
         return path
 
     xlsx_files = glob.glob(os.path.join(base_dir, "*.xlsx"))
-    # 비교결과 파일 자체는 제외
-    xlsx_files = [f for f in xlsx_files if "비교결과" not in os.path.basename(f)]
+    xlsx_files = [f for f in xlsx_files if "중복출고" not in os.path.basename(f)]
     if not xlsx_files:
         return None
-    return max(xlsx_files, key=os.path.getmtime)  # 가장 최근 파일
+    return max(xlsx_files, key=os.path.getmtime)
 
 
 # ==========================================
@@ -49,6 +46,10 @@ def normalize_order_no(val):
     if pd.isna(val):
         return ""
     return re.sub(r"[\s\-_]", "", str(val)).strip()
+
+
+def sep(char="=", n=60):
+    print(char * n)
 
 
 # ==========================================
@@ -66,114 +67,159 @@ def main():
     # ------------------------------------------
     # 1. 데이터 로드
     # ------------------------------------------
-    print(f"파일 로드 중: {os.path.basename(input_path)}")
-    wms   = pd.read_excel(input_path, sheet_name=0, dtype=str)  # Sheet1: WMS
-    cigro = pd.read_excel(input_path, sheet_name=1, dtype=str)  # Sheet2: Cigro
-    print(f"  WMS   {len(wms):,}행 / Cigro {len(cigro):,}행 로드 완료\n")
+    fname = os.path.basename(input_path)
+    sep()
+    print(f"[ 입력 파일 ]")
+    print(f"  {fname}")
+    sep()
+
+    wms   = pd.read_excel(input_path, sheet_name=0, dtype=str)
+    cigro = pd.read_excel(input_path, sheet_name=1, dtype=str)
 
     # ------------------------------------------
     # 2. 정규화 키 생성
     # ------------------------------------------
-    wms["_order_key"]   = wms[WMS_ORDER_COL].apply(normalize_order_no)
+    wms["_order_key"] = wms[WMS_ORDER_COL].apply(normalize_order_no)
+    wms["_sku_key"]   = wms[WMS_SKU_COL].str.strip().str.upper()
+    wms["_comp_key"]  = wms["_order_key"] + "||" + wms["_sku_key"]
+
     cigro["_order_key"] = cigro[CIGRO_ORDER_COL].apply(normalize_order_no)
-    wms["_sku_key"]     = wms[WMS_SKU_COL].str.strip().str.upper()
     cigro["_sku_key"]   = cigro[CIGRO_SKU_COL].str.strip().str.upper()
+    cigro["_comp_key"]  = cigro["_order_key"] + "||" + cigro["_sku_key"]
 
     # ------------------------------------------
-    # 3. 주문번호 매칭률 현황 출력
+    # 3. WMS 현황 출력
     # ------------------------------------------
-    wms_orders     = set(wms["_order_key"]) - {""}
-    cigro_orders   = set(cigro["_order_key"]) - {""}
-    matched_orders = wms_orders & cigro_orders
-    only_wms       = wms_orders - cigro_orders
-    only_cigro     = cigro_orders - wms_orders
-    total          = len(wms_orders | cigro_orders)
+    wms_valid = wms[wms["_order_key"] != ""]
+    wms_unique_orders = wms_valid["_order_key"].nunique()
+    wms_unique_combos = wms_valid["_comp_key"].nunique()
+    wms_total_rows    = len(wms_valid)
 
-    print("=" * 55)
-    print("[ 주문번호 매칭 현황 ]")
-    print(f"  WMS   고유 주문번호 : {len(wms_orders):,}건")
-    print(f"  Cigro 고유 주문번호 : {len(cigro_orders):,}건")
-    print(f"  양쪽 모두 존재      : {len(matched_orders):,}건")
-    print(f"  WMS에만 존재        : {len(only_wms):,}건")
-    print(f"  Cigro에만 존재      : {len(only_cigro):,}건")
-    if total > 0:
-        print(f"  전체 매칭률         : {len(matched_orders)/total*100:.1f}%")
-    print("=" * 55 + "\n")
+    # 중복 그룹: (주문번호+SKU)가 2번 이상 나온 것
+    wms_combo_counts = wms_valid.groupby("_comp_key").size().rename("wms_출고횟수")
+    dup_combos = wms_combo_counts[wms_combo_counts >= 2]
+    dup_combo_keys = set(dup_combos.index)
 
-    # ------------------------------------------
-    # 4. WMS 컬럼 정리 (비교에 필요한 것만 앞에 배치)
-    # ------------------------------------------
-    wms_cols_front = ["주문번호", "상품코드", "수량", "상품명", "고객명",
-                      "출고일자", "출고상태", "운송장번호", "매출처", "UserId", "Name"]
-    wms_front = [c for c in wms_cols_front if c in wms.columns]
-    wms_rest  = [c for c in wms.columns if c not in wms_front and not c.startswith("_")]
-    wms_ordered = wms[wms_front + wms_rest + ["_order_key", "_sku_key"]].copy()
+    dup_rows = wms_valid[wms_valid["_comp_key"].isin(dup_combo_keys)]
 
-    cigro_cols_front = ["order_id", "match_sku", "sku_적용_후_수량", "quantity",
-                        "product_name", "channel_name", "status", "payment_date"]
-    cigro_front = [c for c in cigro_cols_front if c in cigro.columns]
-    cigro_rest  = [c for c in cigro.columns if c not in cigro_front and not c.startswith("_")]
-    cigro_ordered = cigro[cigro_front + cigro_rest + ["_order_key", "_sku_key"]].copy()
-
-    # 컬럼 접두사 추가 (중복 방지)
-    cigro_rename = {c: f"cigro_{c}" for c in cigro_ordered.columns
-                    if c not in ["_order_key", "_sku_key"]}
-    cigro_ordered = cigro_ordered.rename(columns=cigro_rename)
+    print(f"\n[ WMS 출고 데이터 (Sheet1) ]")
+    print(f"  원본 전체 행수                    : {len(wms):,}행")
+    print(f"  주문번호 있는 유효 행수           : {wms_total_rows:,}행")
+    print(f"  고유 주문번호                     : {wms_unique_orders:,}건")
+    print(f"  고유 (주문번호+SKU) 조합          : {wms_unique_combos:,}건")
+    print(f"  ── 1회 출고 (정상)                : {(wms_combo_counts == 1).sum():,}건")
+    print(f"  ── 2회 이상 출고 (중복 의심)      : {len(dup_combos):,}건  ← 확인 필요")
+    if len(dup_combos) > 0:
+        avg_dup = dup_combos.mean()
+        max_dup = dup_combos.max()
+        print(f"     중복 해당 WMS 행수            : {len(dup_rows):,}행")
+        print(f"     평균 출고 횟수                : {avg_dup:.1f}회")
+        print(f"     최대 출고 횟수                : {max_dup}회")
 
     # ------------------------------------------
-    # 5. 주문번호 + SKU 기준 outer merge
+    # 4. Cigro 현황 출력
     # ------------------------------------------
-    merged = pd.merge(
-        wms_ordered,
-        cigro_ordered,
-        on=["_order_key", "_sku_key"],
-        how="outer",
-        indicator=True,
+    cigro_valid = cigro[cigro["_order_key"] != ""]
+    cigro_unique_orders = cigro_valid["_order_key"].nunique()
+    cigro_unique_combos = cigro_valid["_comp_key"].nunique()
+
+    print(f"\n[ Cigro 주문 데이터 (Sheet2) ]")
+    print(f"  원본 전체 행수                    : {len(cigro):,}행")
+    print(f"  주문번호 있는 유효 행수           : {len(cigro_valid):,}행")
+    print(f"  고유 주문번호                     : {cigro_unique_orders:,}건")
+    print(f"  고유 (주문번호+SKU) 조합          : {cigro_unique_combos:,}건")
+
+    # ------------------------------------------
+    # 5. 중복 출고 분석
+    # ------------------------------------------
+    sep()
+    print(f"[ 중복 출고 분석 결과 ]")
+    sep()
+
+    if len(dup_combos) == 0:
+        print("  중복 출고된 (주문번호+SKU) 조합이 없습니다. 정상입니다.")
+        return
+
+    # Cigro에서 (주문번호+SKU)별 수량 집계
+    cigro_qty_map = (
+        cigro_valid
+        .assign(_cigro_qty=pd.to_numeric(cigro_valid[CIGRO_QTY_COL], errors="coerce"))
+        .groupby("_comp_key")["_cigro_qty"]
+        .sum()
     )
 
-    # ------------------------------------------
-    # 6. 3개 그룹 분류
-    # ------------------------------------------
-    df_matched    = merged[merged["_merge"] == "both"].copy()
-    df_wms_only   = merged[merged["_merge"] == "left_only"].copy()
-    df_cigro_only = merged[merged["_merge"] == "right_only"].copy()
+    # 중복 요약 테이블 구성
+    wms_dup_agg = (
+        wms_valid[wms_valid["_comp_key"].isin(dup_combo_keys)]
+        .assign(_wms_qty=pd.to_numeric(wms_valid.loc[wms_valid["_comp_key"].isin(dup_combo_keys), WMS_QTY_COL], errors="coerce"))
+        .groupby("_comp_key")
+        .agg(
+            WMS_출고횟수=("_order_key", "count"),
+            WMS_총수량=("_wms_qty", "sum"),
+        )
+        .join(dup_combos)
+        .join(cigro_qty_map.rename("Cigro_수량"))
+    )
 
-    # 매칭 데이터: 수량 비교 컬럼 추가
-    if not df_matched.empty:
-        wms_qty   = pd.to_numeric(df_matched[WMS_QTY_COL],           errors="coerce")
-        cigro_qty = pd.to_numeric(df_matched[f"cigro_{CIGRO_QTY_COL}"], errors="coerce")
-        df_matched.insert(2, "수량_WMS",   wms_qty)
-        df_matched.insert(3, "수량_Cigro", cigro_qty)
-        df_matched.insert(4, "수량_일치",  wms_qty == cigro_qty)
-        df_matched.insert(5, "수량_차이",  wms_qty - cigro_qty)
+    # 주문번호 / SKU 복원
+    wms_dup_agg[["주문번호", "상품코드"]] = (
+        wms_dup_agg.index.str.split("||", expand=True).to_frame(index=False)[[0, 1]].values
+    )
+    wms_dup_agg["Cigro_존재"] = wms_dup_agg["Cigro_수량"].notna()
+    wms_dup_agg["수량_차이(WMS합산-Cigro)"] = wms_dup_agg["WMS_총수량"] - wms_dup_agg["Cigro_수량"]
 
-    # 내부 키 컬럼 / indicator 제거
-    drop_cols = ["_order_key", "_sku_key", "_merge"]
-    for df in [df_matched, df_wms_only, df_cigro_only]:
-        df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True)
+    # 컬럼 순서 정리
+    summary = wms_dup_agg[["주문번호", "상품코드",
+                            "WMS_출고횟수", "WMS_총수량",
+                            "Cigro_존재", "Cigro_수량",
+                            "수량_차이(WMS합산-Cigro)"]].copy()
+    summary = summary.sort_values(["Cigro_존재", "수량_차이(WMS합산-Cigro)"],
+                                  ascending=[False, False])
+
+    # 그룹별 통계 출력
+    in_cigro     = summary["Cigro_존재"].sum()
+    not_in_cigro = (~summary["Cigro_존재"]).sum()
+
+    print(f"  WMS 중복 출고 (주문번호+SKU)      : {len(summary):,}건")
+    print(f"  ├ Cigro에도 존재 (비교 가능)      : {in_cigro:,}건")
+    print(f"  └ Cigro에 없음  (WMS 단독)        : {not_in_cigro:,}건")
+
+    if in_cigro > 0:
+        cigro_subset = summary[summary["Cigro_존재"]]
+        qty_ok  = (cigro_subset["수량_차이(WMS합산-Cigro)"] == 0).sum()
+        qty_over = (cigro_subset["수량_차이(WMS합산-Cigro)"] > 0).sum()
+        qty_under = (cigro_subset["수량_차이(WMS합산-Cigro)"] < 0).sum()
+        print(f"\n  Cigro 존재 {in_cigro}건 중 수량 비교:")
+        print(f"  ├ WMS합산 == Cigro (수량 일치) : {qty_ok:,}건")
+        print(f"  ├ WMS합산  > Cigro (과잉 출고) : {qty_over:,}건  ← 주의!")
+        print(f"  └ WMS합산  < Cigro (부족 출고) : {qty_under:,}건  ← 주의!")
+
+    # ------------------------------------------
+    # 6. 중복 상세 행 (WMS 원본 행 그대로)
+    # ------------------------------------------
+    # 앞쪽에 주요 컬럼 배치
+    key_cols = [WMS_ORDER_COL, WMS_SKU_COL, WMS_QTY_COL]
+    extra_cols = ["상품명", "고객명", "출고일자", "출고상태", "운송장번호", "매출처"]
+    front = key_cols + [c for c in extra_cols if c in wms.columns]
+    rest  = [c for c in wms.columns if c not in front and not c.startswith("_")]
+    detail = (
+        dup_rows[front + rest]
+        .sort_values([WMS_ORDER_COL, WMS_SKU_COL])
+        .copy()
+    )
 
     # ------------------------------------------
     # 7. 결과 저장
     # ------------------------------------------
-    output_path = os.path.join(base_dir, "비교결과_WMS_vs_Cigro.xlsx")
-
+    output_path = os.path.join(base_dir, "중복출고_분석결과.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df_matched.to_excel(writer,    sheet_name="매칭 데이터",  index=False)
-        df_wms_only.to_excel(writer,   sheet_name="WMS만 있음",   index=False)
-        df_cigro_only.to_excel(writer, sheet_name="Cigro만 있음", index=False)
+        summary.to_excel(writer, sheet_name="중복출고_요약",   index=False)
+        detail.to_excel(writer,  sheet_name="중복출고_상세행", index=False)
 
-    print("[ SKU 단위 분류 결과 ]")
-    print(f"  매칭 데이터  : {len(df_matched):,}행")
-    print(f"  WMS만 있음   : {len(df_wms_only):,}행")
-    print(f"  Cigro만 있음 : {len(df_cigro_only):,}행")
-
-    if not df_matched.empty and "수량_일치" in df_matched.columns:
-        qty_ok  = df_matched["수량_일치"].sum()
-        qty_all = df_matched["수량_일치"].count()
-        print(f"\n  수량 일치    : {qty_ok:,}/{qty_all:,}건 ({qty_ok/qty_all*100:.1f}%)")
-        print(f"  수량 불일치  : {qty_all-qty_ok:,}건")
-
-    print(f"\n저장 완료 → 비교결과_WMS_vs_Cigro.xlsx")
+    sep()
+    print(f"\n저장 완료 → 중복출고_분석결과.xlsx")
+    print(f"  Sheet1 [중복출고_요약]   : {len(summary):,}건  (주문번호+SKU 조합 단위)")
+    print(f"  Sheet2 [중복출고_상세행] : {len(detail):,}행  (WMS 원본 행 전체)\n")
 
 
 if __name__ == "__main__":
