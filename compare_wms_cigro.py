@@ -1,15 +1,16 @@
 import pandas as pd
 import os
 import re
+import sys
+import glob
 
 # ==========================================
 # 설정 영역
 # ==========================================
 
-# 비교할 엑셀 파일명 (스크립트와 같은 폴더에 있어야 함)
-INPUT_FILE = "출고진행_합산_20260226_20260308.xlsx"
-
 # Sheet1: WMS 출고 데이터 컬럼명
+WMS_ORDER_COL = "주문번호"   # 주문번호
+
 WMS_ORDER_COL = "주문번호"   # 주문번호
 WMS_SKU_COL   = "상품코드"   # SKU 코드
 WMS_QTY_COL   = "수량"       # 출고 수량
@@ -18,6 +19,25 @@ WMS_QTY_COL   = "수량"       # 출고 수량
 CIGRO_ORDER_COL = "order_id"          # 주문번호
 CIGRO_SKU_COL   = "match_sku"         # SKU 코드
 CIGRO_QTY_COL   = "sku_적용_후_수량"  # 수량 (SKU 환산 후)
+
+
+# ==========================================
+# 입력 파일 자동 탐색
+# 우선순위: 1) 커맨드라인 인자  2) 폴더 내 최신 .xlsx
+# ==========================================
+def resolve_input_file(base_dir):
+    if len(sys.argv) > 1:
+        path = sys.argv[1]
+        if not os.path.isabs(path):
+            path = os.path.join(base_dir, path)
+        return path
+
+    xlsx_files = glob.glob(os.path.join(base_dir, "*.xlsx"))
+    # 비교결과 파일 자체는 제외
+    xlsx_files = [f for f in xlsx_files if "비교결과" not in os.path.basename(f)]
+    if not xlsx_files:
+        return None
+    return max(xlsx_files, key=os.path.getmtime)  # 가장 최근 파일
 
 
 # ==========================================
@@ -36,16 +56,17 @@ def normalize_order_no(val):
 # ==========================================
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    input_path = os.path.join(base_dir, INPUT_FILE)
+    input_path = resolve_input_file(base_dir)
 
-    if not os.path.exists(input_path):
-        print(f"[오류] 파일을 찾을 수 없습니다: {input_path}")
+    if not input_path or not os.path.exists(input_path):
+        print("[오류] 비교할 엑셀 파일을 찾을 수 없습니다.")
+        print("사용법: python compare_wms_cigro.py [파일명.xlsx]")
         return
 
     # ------------------------------------------
     # 1. 데이터 로드
     # ------------------------------------------
-    print(f"파일 로드 중: {INPUT_FILE}")
+    print(f"파일 로드 중: {os.path.basename(input_path)}")
     wms   = pd.read_excel(input_path, sheet_name=0, dtype=str)  # Sheet1: WMS
     cigro = pd.read_excel(input_path, sheet_name=1, dtype=str)  # Sheet2: Cigro
     print(f"  WMS   {len(wms):,}행 / Cigro {len(cigro):,}행 로드 완료\n")
