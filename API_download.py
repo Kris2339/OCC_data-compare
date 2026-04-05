@@ -7,7 +7,7 @@ import datetime
 # 1. [설정 영역] 날짜 및 사용자 목록 설정
 # ==========================================
 _today = datetime.date.today()
-SEARCH_FROM_DT = (_today - datetime.timedelta(days=10)).strftime("%Y%m%d")  # 오늘 기준 10일 전
+SEARCH_FROM_DT = (_today - datetime.timedelta(days=30)).strftime("%Y%m%d")  # 오늘 기준 30일 전
 SEARCH_TO_DT   = _today.strftime("%Y%m%d")                                  # 오늘
 
 # 사용자 계정 목록 (이곳에 계정을 계속 추가하면 됩니다)
