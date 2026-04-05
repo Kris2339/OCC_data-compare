@@ -20,13 +20,9 @@ CIGRO_SKU_COL     = "match_sku"
 CIGRO_QTY_COL     = "sku_적용_후_수량"
 CIGRO_CHANNEL_COL = "channel_name"
 
-# Cigro 주문번호와 WMS 주문번호를 직접 비교할 수 있는 채널
-# (분석을 통해 확인된 매칭 가능 채널)
-MATCHABLE_WMS_CHANNELS = {"ON003", "ON017", "ON040", "ON046"}
-
-# 네이버 스마트스토어: WMS=발주번호, Cigro=주문번호로 ID 체계가 달라 매칭 불가
-# → 주문번호 비교 대신 전체 건수 비교만 가능
-UNMATCHABLE_WMS_CHANNELS = {"ON008"}
+# Cigro 주문번호와 WMS 주문번호를 비교할 수 있는 채널
+# ON008(스마트스토어): WMS 주문번호 끝자리 1→0 변환하면 Cigro order_id와 일치
+MATCHABLE_WMS_CHANNELS = {"ON003", "ON017", "ON040", "ON046", "ON008"}
 
 
 # ==========================================
@@ -51,6 +47,18 @@ def norm(v):
 
 def sep(char="=", n=60):
     print(char * n)
+
+
+def to_cigro_key(order_norm, channel):
+    """
+    WMS 주문번호 → Cigro order_id 변환
+    - ON008(스마트스토어): WMS 주문번호 끝자리가 1, Cigro는 0
+      예) WMS 2026040122335441 → Cigro 2026040122335440
+    - 그 외: 그대로 사용
+    """
+    if channel == "ON008" and len(order_norm) == 16 and order_norm.endswith("1"):
+        return order_norm[:-1] + "0"
+    return order_norm
 
 
 def make_dup_key(row):
@@ -100,6 +108,10 @@ def main():
     wms_valid["_sku"]      = wms_valid[WMS_SKU_COL].str.strip().str.upper()
     wms_valid["_dup_key"]  = wms_valid.apply(make_dup_key, axis=1)
     wms_valid["_wms_qty"]  = pd.to_numeric(wms_valid[WMS_QTY_COL], errors="coerce")
+    # Cigro 매칭용 키: ON008은 끝자리 1→0 변환
+    wms_valid["_cigro_key"] = wms_valid.apply(
+        lambda r: to_cigro_key(r["_주문_n"], r[WMS_CHANNEL_COL]), axis=1
+    )
 
     # Cigro: 정규화
     cigro["_order_n"] = cigro[CIGRO_ORDER_COL].apply(norm)
@@ -156,7 +168,9 @@ def main():
         agg["상품코드"]   = agg.index.map(key_to_sku)
         agg["채널"]       = agg.index.map(key_to_ch)
         agg["Cigro_수량"] = agg.apply(
-            lambda r: cigro_qty_map.get((norm(r["주문번호"]), norm(r["상품코드"])), None), axis=1
+            lambda r: cigro_qty_map.get(
+                (to_cigro_key(norm(r["주문번호"]), r["채널"]), norm(r["상품코드"])), None
+            ), axis=1
         )
         agg["Cigro_주문확인"] = agg["Cigro_수량"].notna()
         agg["수량차이(WMS-Cigro)"] = agg["WMS_총수량"] - agg["Cigro_수량"]
@@ -190,12 +204,12 @@ def main():
     sep()
     print("[ 검사 ② ] 미등록 출고 (Cigro 주문 없이 WMS에서 출고된 것)")
     print("  Cigro에 주문 기록이 없는데 WMS에서 출고가 나간 경우를 찾습니다.")
-    print(f"  분석 대상 채널: {sorted(MATCHABLE_WMS_CHANNELS)} (주문번호 직접 비교 가능)")
-    print(f"  제외 채널     : {sorted(UNMATCHABLE_WMS_CHANNELS)} (스마트스토어 — ID체계 달라 별도 건수 비교)")
+    print(f"  분석 대상 채널: {sorted(MATCHABLE_WMS_CHANNELS)}")
+    print(f"    ※ ON008(스마트스토어): WMS 주문번호 끝자리 1→0 변환 후 Cigro와 비교")
     sep("-")
 
     wms_matchable   = wms_valid[wms_valid[WMS_CHANNEL_COL].isin(MATCHABLE_WMS_CHANNELS)].copy()
-    wms_unmatched   = wms_matchable[~wms_matchable["_주문_n"].isin(cigro_order_set)].copy()
+    wms_unmatched   = wms_matchable[~wms_matchable["_cigro_key"].isin(cigro_order_set)].copy()
     n_matchable_wms = len(wms_matchable)
     n_confirmed     = n_matchable_wms - len(wms_unmatched)
 
@@ -211,36 +225,24 @@ def main():
     # ──────────────────────────────────────────────
     # 참고: Cigro 미출고 현황
     # ──────────────────────────────────────────────
-    cigro_matchable = cigro_valid[~cigro_valid[CIGRO_CHANNEL_COL].isin({"SMART_STORE"})]
-    matchable_cigro_set = set(cigro_matchable["_order_n"])
-    wms_주문_set   = set(wms_valid["_주문_n"])
-    wms_부주문_set = set(wms_valid.loc[wms_valid["_부주문_n"] != "", "_부주문_n"])
-    cigro_missed   = matchable_cigro_set - (wms_주문_set | wms_부주문_set)
+    # Cigro order_id 집합 vs WMS _cigro_key 집합으로 비교 (전 채널 통합)
+    wms_cigro_key_set = set(wms_valid["_cigro_key"])
+    cigro_missed_set  = set(cigro_valid["_order_n"]) - wms_cigro_key_set
 
     sep()
     print("[ 참고 ] Cigro에 주문은 있는데 WMS 출고 기록이 없는 것")
     print("  (날짜 범위 차이로 발생 가능 — 주문일과 출고일이 다를 수 있음)")
     sep("-")
-    if cigro_missed:
+    if cigro_missed_set:
         lines = []
-        for ch_name, sub_c in cigro_matchable.groupby(CIGRO_CHANNEL_COL):
+        for ch_name, sub_c in cigro_valid.groupby(CIGRO_CHANNEL_COL):
             ids  = set(sub_c["_order_n"])
-            miss = len(ids - (wms_주문_set | wms_부주문_set))
+            miss = len(ids - wms_cigro_key_set)
             if miss > 0:
                 lines.append(f"{ch_name}: {miss}건")
-        print(f"  미출고 주문: {len(cigro_missed):,}건  ({' / '.join(lines)})")
+        print(f"  미출고 주문: {len(cigro_missed_set):,}건  ({' / '.join(lines)})")
     else:
         print(f"  미출고 주문 없음  ✓")
-
-    # 스마트스토어 건수 비교
-    on008    = wms_valid[wms_valid[WMS_CHANNEL_COL].isin(UNMATCHABLE_WMS_CHANNELS)]
-    ss_cigro = cigro_valid[cigro_valid[CIGRO_CHANNEL_COL] == "SMART_STORE"]
-    if not on008.empty and not ss_cigro.empty:
-        w = on008["_주문_n"].nunique()
-        c = ss_cigro["_order_n"].nunique()
-        diff = w - c
-        print(f"\n  스마트스토어(ON008): WMS {w:,}건 / Cigro {c:,}건 (차이 {diff:+,})")
-        print(f"    → 주문번호 ID 체계가 달라 건수로만 비교, 개별 매칭 불가")
 
     # ──────────────────────────────────────────────
     # 최종 요약
