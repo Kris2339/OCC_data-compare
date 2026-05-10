@@ -19,6 +19,7 @@ CIGRO_ORDER_COL   = "order_id"
 CIGRO_SKU_COL     = "match_sku"
 CIGRO_QTY_COL     = "sku_적용_후_수량"
 CIGRO_CHANNEL_COL = "channel_name"
+CIGRO_STATUS_COL  = "status"
 
 # Cigro 주문번호와 WMS 주문번호를 비교할 수 있는 채널
 # ON008(스마트스토어): WMS 주문번호 끝자리 1→0 변환하면 Cigro order_id와 일치
@@ -127,7 +128,11 @@ def main():
     cigro_valid       = cigro[cigro["_order_n"] != ""].copy()
     cigro_valid["_qty"] = pd.to_numeric(cigro_valid[CIGRO_QTY_COL], errors="coerce")
     cigro_qty_map       = cigro_valid.groupby(["_order_n", "_sku"])["_qty"].sum()
-    cigro_order_set     = set(cigro_valid["_order_n"])  # Cigro 전체 주문번호 집합
+    cigro_order_set     = set(cigro_valid["_order_n"])
+    # 교환 상태 주문: Cigro order_id가 WMS 주문번호와 동일 형식 (변환 불필요)
+    cigro_교환_set = set(
+        cigro_valid[cigro_valid[CIGRO_STATUS_COL] == "교환"]["_order_n"]
+    ) if CIGRO_STATUS_COL in cigro_valid.columns else set()
 
     # ──────────────────────────────────────────────
     # 2. 데이터 현황 출력
@@ -185,23 +190,31 @@ def main():
 
         # 정상 분류 ①: WMS 총수량 = Cigro 수량 → 분할출고(정상)
         ok_qty_mask = agg["Cigro_주문확인"] & (agg["수량차이(WMS-Cigro)"] == 0)
+        qty_ok_keys = set(agg[ok_qty_mask].index)
 
         # 정상 분류 ②: 같은 날 LOT만 달라 분할 출고된 경우
-        # 조건: 모든 출고가 같은 날짜이고, LOT 컬럼이 있고, LOT 값이 2개 이상
         lot_ok_keys = set()
         if WMS_LOT_COL in wms.columns:
             for dk in dup_keys:
-                rows = dup_wms[dup_wms["_dup_key"] == dk]
+                rows  = dup_wms[dup_wms["_dup_key"] == dk]
                 dates = rows[WMS_DATE_COL].dropna().unique() if WMS_DATE_COL in rows.columns else []
                 lots  = rows[WMS_LOT_COL].dropna().unique()
                 if len(dates) == 1 and len(lots) >= 2:
                     lot_ok_keys.add(dk)
 
-        ok_keys      = set(agg[ok_qty_mask].index) | lot_ok_keys
-        problem_keys = dup_keys - ok_keys
-        n_ok_dup        = len(ok_keys)
-        n_lot_ok        = len(lot_ok_keys - set(agg[ok_qty_mask].index))
-        n_problem_dup   = len(problem_keys)
+        # 정상 분류 ③: Cigro 교환 상태 주문 → 재출고가 맞음
+        교환_ok_keys = set()
+        for dk in dup_keys:
+            rows = dup_wms[dup_wms["_dup_key"] == dk]
+            if set(rows["_주문_n"]) & cigro_교환_set:
+                교환_ok_keys.add(dk)
+
+        ok_keys          = qty_ok_keys | lot_ok_keys | 교환_ok_keys
+        problem_keys     = dup_keys - ok_keys
+        n_ok_dup         = len(ok_keys)
+        n_lot_ok         = len(lot_ok_keys - qty_ok_keys)
+        n_교환_ok        = len(교환_ok_keys - qty_ok_keys - lot_ok_keys)
+        n_problem_dup    = len(problem_keys)
         problem_dup_keys = problem_keys
 
         agg = agg.reset_index(drop=True)
@@ -211,9 +224,10 @@ def main():
         total_dup_rows = len(dup_wms)
         print(f"  발견: {len(dup_keys)}개 (주문+SKU) 조합  /  해당 WMS 행 합계 {total_dup_rows}행")
         print()
-        n_qty_ok = n_ok_dup - n_lot_ok
+        n_qty_ok = len(qty_ok_keys)
         print(f"  ┌ 정상 (수량합산=Cigro, 분할출고)     : {n_qty_ok}개 조합  → 엑셀 미포함")
         print(f"  ├ 정상 (같은날 LOT 분할출고)          : {n_lot_ok}개 조합  → 엑셀 미포함")
+        print(f"  ├ 정상 (Cigro 교환 재출고)            : {n_교환_ok}개 조합  → 엑셀 미포함")
         print(f"  └ 확인 필요                           : {n_problem_dup}개 조합  → 엑셀 \"중복출고\" 시트")
 
         if n_problem_dup > 0:
@@ -287,9 +301,9 @@ def main():
             print(f"  ✓ 미등록 출고 : 없음")
     if n_ok_dup > 0:
         parts = []
-        n_qty_ok = n_ok_dup - n_lot_ok
         if n_qty_ok  > 0: parts.append(f"수량합산 분할출고 {n_qty_ok}건")
         if n_lot_ok  > 0: parts.append(f"LOT 분할출고 {n_lot_ok}건")
+        if n_교환_ok > 0: parts.append(f"교환 재출고 {n_교환_ok}건")
         print(f"  ✓ 정상 처리   : {n_ok_dup}개 조합  ({', '.join(parts)})")
     print(f"  ※ 제외됨     : ON032/ON033 파손재발송 {n_exempt}건 (검사 대상 아님)")
 
