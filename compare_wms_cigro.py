@@ -24,6 +24,12 @@ CIGRO_CHANNEL_COL = "channel_name"
 # ON008(스마트스토어): WMS 주문번호 끝자리 1→0 변환하면 Cigro order_id와 일치
 MATCHABLE_WMS_CHANNELS = {"ON003", "ON017", "ON040", "ON046", "ON008"}
 
+# 파손 재발송 채널: Cigro에 주문이 없는 것이 정상 → 모든 검사에서 제외
+EXEMPT_WMS_CHANNELS = {"ON032", "ON033"}
+
+WMS_DATE_COL = "출고일자"
+WMS_LOT_COL  = "LOT"
+
 
 # ==========================================
 # 유틸
@@ -97,11 +103,13 @@ def main():
     wms   = pd.read_excel(input_path, sheet_name=0, dtype=str)
     cigro = pd.read_excel(input_path, sheet_name=1, dtype=str)
 
-    # WMS: 주문번호 없는 행 및 수량 0 이하 행 제거
+    # WMS: 주문번호 없는 행, 수량 0 이하, 파손재발송(EXEMPT) 채널 제거
     wms_valid   = wms[wms[WMS_ORDER_COL].notna()].copy()
     wms_qty_num = pd.to_numeric(wms_valid[WMS_QTY_COL], errors="coerce").fillna(0)
     n_zero_qty  = (wms_qty_num <= 0).sum()
     wms_valid   = wms_valid[wms_qty_num > 0].copy()
+    n_exempt    = wms_valid[WMS_CHANNEL_COL].isin(EXEMPT_WMS_CHANNELS).sum()
+    wms_valid   = wms_valid[~wms_valid[WMS_CHANNEL_COL].isin(EXEMPT_WMS_CHANNELS)].copy()
 
     wms_valid["_주문_n"]   = wms_valid[WMS_ORDER_COL].apply(norm)
     wms_valid["_부주문_n"] = wms_valid[WMS_SUBORDER_COL].apply(norm)
@@ -126,7 +134,7 @@ def main():
     # ──────────────────────────────────────────────
     print(f"\n[ 데이터 현황 ]")
     print(f"  WMS 출고   : {len(wms_valid):,}건")
-    print(f"               (원본 {len(wms):,}행에서 수량=0인 {n_zero_qty}건 제외 — 취소·오류 처리 행)")
+    print(f"               (원본 {len(wms):,}행에서 수량=0인 {n_zero_qty}건, 파손재발송(ON032/ON033) {n_exempt}건 제외)")
     ch_counts = cigro_valid[CIGRO_CHANNEL_COL].value_counts()
     cigro_ch_str = "  /  ".join(f"{ch} {cnt}건" for ch, cnt in ch_counts.items())
     print(f"  Cigro 주문 : {cigro_valid['_order_n'].nunique():,}건  ({cigro_ch_str})")
@@ -175,12 +183,25 @@ def main():
         agg["Cigro_주문확인"] = agg["Cigro_수량"].notna()
         agg["수량차이(WMS-Cigro)"] = agg["WMS_총수량"] - agg["Cigro_수량"]
 
-        # 수량 합산이 Cigro와 일치 = 분할출고로 판단 → 정상
-        ok_mask      = agg["Cigro_주문확인"] & (agg["수량차이(WMS-Cigro)"] == 0)
-        ok_keys      = set(agg[ok_mask].index)
+        # 정상 분류 ①: WMS 총수량 = Cigro 수량 → 분할출고(정상)
+        ok_qty_mask = agg["Cigro_주문확인"] & (agg["수량차이(WMS-Cigro)"] == 0)
+
+        # 정상 분류 ②: 같은 날 LOT만 달라 분할 출고된 경우
+        # 조건: 모든 출고가 같은 날짜이고, LOT 컬럼이 있고, LOT 값이 2개 이상
+        lot_ok_keys = set()
+        if WMS_LOT_COL in wms.columns:
+            for dk in dup_keys:
+                rows = dup_wms[dup_wms["_dup_key"] == dk]
+                dates = rows[WMS_DATE_COL].dropna().unique() if WMS_DATE_COL in rows.columns else []
+                lots  = rows[WMS_LOT_COL].dropna().unique()
+                if len(dates) == 1 and len(lots) >= 2:
+                    lot_ok_keys.add(dk)
+
+        ok_keys      = set(agg[ok_qty_mask].index) | lot_ok_keys
         problem_keys = dup_keys - ok_keys
-        n_ok_dup     = len(ok_keys)
-        n_problem_dup = len(problem_keys)
+        n_ok_dup        = len(ok_keys)
+        n_lot_ok        = len(lot_ok_keys - set(agg[ok_qty_mask].index))
+        n_problem_dup   = len(problem_keys)
         problem_dup_keys = problem_keys
 
         agg = agg.reset_index(drop=True)
@@ -190,8 +211,10 @@ def main():
         total_dup_rows = len(dup_wms)
         print(f"  발견: {len(dup_keys)}개 (주문+SKU) 조합  /  해당 WMS 행 합계 {total_dup_rows}행")
         print()
-        print(f"  ┌ 정상 처리 (분할출고 — 수량 합산이 Cigro와 일치) : {n_ok_dup}개 조합  → 엑셀 미포함")
-        print(f"  └ 확인 필요                                        : {n_problem_dup}개 조합  → 엑셀 \"중복출고\" 시트")
+        n_qty_ok = n_ok_dup - n_lot_ok
+        print(f"  ┌ 정상 (수량합산=Cigro, 분할출고)     : {n_qty_ok}개 조합  → 엑셀 미포함")
+        print(f"  ├ 정상 (같은날 LOT 분할출고)          : {n_lot_ok}개 조합  → 엑셀 미포함")
+        print(f"  └ 확인 필요                           : {n_problem_dup}개 조합  → 엑셀 \"중복출고\" 시트")
 
         if n_problem_dup > 0:
             prob_rows  = dup_wms[dup_wms["_dup_key"].isin(problem_dup_keys)]
@@ -263,7 +286,12 @@ def main():
         else:
             print(f"  ✓ 미등록 출고 : 없음")
     if n_ok_dup > 0:
-        print(f"  ✓ 정상 처리   : {n_ok_dup}개 조합  (분할출고 — 수량 합산 일치, 문제 없음)")
+        parts = []
+        n_qty_ok = n_ok_dup - n_lot_ok
+        if n_qty_ok  > 0: parts.append(f"수량합산 분할출고 {n_qty_ok}건")
+        if n_lot_ok  > 0: parts.append(f"LOT 분할출고 {n_lot_ok}건")
+        print(f"  ✓ 정상 처리   : {n_ok_dup}개 조합  ({', '.join(parts)})")
+    print(f"  ※ 제외됨     : ON032/ON033 파손재발송 {n_exempt}건 (검사 대상 아님)")
 
     # ──────────────────────────────────────────────
     # 엑셀 저장
