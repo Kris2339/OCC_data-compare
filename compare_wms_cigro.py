@@ -104,13 +104,16 @@ def main():
     wms   = pd.read_excel(input_path, sheet_name=0, dtype=str)
     cigro = pd.read_excel(input_path, sheet_name=1, dtype=str)
 
-    # WMS: 주문번호 없는 행, 수량 0 이하, 파손재발송(EXEMPT) 채널 제거
+    # WMS: 주문번호 없는 행, 수량 0 이하, 파손재발송(EXEMPT) 채널, 사은품 제거
     wms_valid   = wms[wms[WMS_ORDER_COL].notna()].copy()
     wms_qty_num = pd.to_numeric(wms_valid[WMS_QTY_COL], errors="coerce").fillna(0)
     n_zero_qty  = (wms_qty_num <= 0).sum()
     wms_valid   = wms_valid[wms_qty_num > 0].copy()
     n_exempt    = wms_valid[WMS_CHANNEL_COL].isin(EXEMPT_WMS_CHANNELS).sum()
     wms_valid   = wms_valid[~wms_valid[WMS_CHANNEL_COL].isin(EXEMPT_WMS_CHANNELS)].copy()
+    is_사은품   = wms_valid[WMS_ORDER_COL].astype(str).str.contains("사은품", na=False)
+    n_사은품    = is_사은품.sum()
+    wms_valid   = wms_valid[~is_사은품].copy()
 
     wms_valid["_주문_n"]   = wms_valid[WMS_ORDER_COL].apply(norm)
     wms_valid["_부주문_n"] = wms_valid[WMS_SUBORDER_COL].apply(norm)
@@ -139,7 +142,7 @@ def main():
     # ──────────────────────────────────────────────
     print(f"\n[ 데이터 현황 ]")
     print(f"  WMS 출고   : {len(wms_valid):,}건")
-    print(f"               (원본 {len(wms):,}행에서 수량=0인 {n_zero_qty}건, 파손재발송(ON032/ON033) {n_exempt}건 제외)")
+    print(f"               (원본 {len(wms):,}행에서 수량=0 {n_zero_qty}건 / 파손재발송(ON032·ON033) {n_exempt}건 / 사은품 {n_사은품}건 제외)")
     ch_counts = cigro_valid[CIGRO_CHANNEL_COL].value_counts()
     cigro_ch_str = "  /  ".join(f"{ch} {cnt}건" for ch, cnt in ch_counts.items())
     print(f"  Cigro 주문 : {cigro_valid['_order_n'].nunique():,}건  ({cigro_ch_str})")
@@ -305,7 +308,7 @@ def main():
         if n_lot_ok  > 0: parts.append(f"LOT 분할출고 {n_lot_ok}건")
         if n_교환_ok > 0: parts.append(f"교환 재출고 {n_교환_ok}건")
         print(f"  ✓ 정상 처리   : {n_ok_dup}개 조합  ({', '.join(parts)})")
-    print(f"  ※ 제외됨     : ON032/ON033 파손재발송 {n_exempt}건 (검사 대상 아님)")
+    print(f"  ※ 제외됨     : 파손재발송(ON032·ON033) {n_exempt}건 / 사은품 {n_사은품}건")
 
     # ──────────────────────────────────────────────
     # 엑셀 저장
